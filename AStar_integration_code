@@ -7,8 +7,6 @@
 #include <chrono>
 #include <iostream>
 
-// Include AStarPlanner and related classes as defined earlier.
-
 class AStarPlannerNode : public rclcpp::Node {
 public:
     AStarPlannerNode()
