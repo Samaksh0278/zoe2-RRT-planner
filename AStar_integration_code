@@ -1,0 +1,120 @@
+#include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <tuple>
+#include <vector>
+#include <cmath>
+#include <chrono>
+#include <iostream>
+
+// Include AStarPlanner and related classes as defined earlier.
+
+class AStarPlannerNode : public rclcpp::Node {
+public:
+    AStarPlannerNode()
+        : Node("a_star_planner_node"),
+          robot_x_(0.0), robot_y_(0.0), robot_theta_(0.0),
+          axle_radius_(0.325), axle_width_(1.64), axle_wheelbase_(1.91) {
+        // Subscribe to the pose and axle configuration topics
+        pose_subscription_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+            "/robot_pose", 10, std::bind(&AStarPlannerNode::pose_callback, this, std::placeholders::_1));
+
+        axle_subscription_ = this->create_subscription<std_msgs::msg::Float32MultiArray>(
+            "/axle_config", 10, std::bind(&AStarPlannerNode::axle_callback, this, std::placeholders::_1));
+
+        RCLCPP_INFO(this->get_logger(), "A* Planner Node Initialized");
+    }
+
+private:
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscription_;
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr axle_subscription_;
+
+    double robot_x_, robot_y_, robot_theta_;
+    double axle_radius_, axle_width_, axle_wheelbase_;
+    bool pose_received_ = false, axle_config_received_ = false;
+
+    void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        robot_x_ = msg->pose.position.x;
+        robot_y_ = msg->pose.position.y;
+        robot_theta_ = atan2(
+            2.0 * (msg->pose.orientation.w * msg->pose.orientation.z),
+            1.0 - 2.0 * (msg->pose.orientation.z * msg->pose.orientation.z));
+
+        pose_received_ = true;
+        RCLCPP_INFO(this->get_logger(), "Pose Received: x=%.2f, y=%.2f, theta=%.2f",
+                    robot_x_, robot_y_, robot_theta_);
+
+        // Check if we can run A*
+        if (pose_received_ && axle_config_received_) {
+            plan_path();
+        }
+    }
+
+    void axle_callback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
+        if (msg->data.size() >= 3) {
+            axle_radius_ = msg->data[0];
+            axle_width_ = msg->data[1];
+            axle_wheelbase_ = msg->data[2];
+
+            axle_config_received_ = true;
+            RCLCPP_INFO(this->get_logger(),
+                        "Axle Config Received: radius=%.2f, width=%.2f, wheelbase=%.2f",
+                        axle_radius_, axle_width_, axle_wheelbase_);
+
+            // Check if we can run A*
+            if (pose_received_ && axle_config_received_) {
+                plan_path();
+            }
+        } else {
+            RCLCPP_WARN(this->get_logger(),
+                        "Invalid Axle Config received, expected 3 elements.");
+        }
+    }
+
+    void plan_path() {
+        // Goal position (example, can be dynamic)
+        double goal_x = 4.0, goal_y = 4.0;
+
+        // A* parameters
+        double dt = 0.1;
+        double wgt_heur = 5.0;
+        double goal_radius = 0.1;
+        double th_gain = 0.1;
+
+        // Create the A* planner
+        AStarPlanner planner(robot_x_, robot_y_, goal_x, goal_y,
+                             {dt, axle_radius_, axle_width_, axle_wheelbase_, wgt_heur, goal_radius, th_gain});
+
+        // Start planning
+        auto start_time = std::chrono::high_resolution_clock::now();
+        auto path = planner.a_star();
+        auto end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end_time - start_time;
+
+        RCLCPP_INFO(this->get_logger(), "A* Planning Completed in %.4f seconds", elapsed.count());
+
+        // Output the path and generate service call commands
+        int step_number = 1;
+        for (const auto& step : path) {
+            double x = std::get<0>(step);
+            double y = std::get<1>(step);
+            double theta = std::get<2>(step);
+            double radius = std::get<3>(step);
+            double speed = std::get<4>(step);
+
+            std::cout << "ros2 service call /zoe_drive zoe2_interfaces/srv/DriveCommand '{drive_arc: {radius: "
+                      << radius << ", speed: " << speed << ", time: " << (step_number * 1000)
+                      << ", sender: \"step_" << step_number << "\"}}'" << std::endl;
+
+            ++step_number;
+        }
+    }
+};
+
+int main(int argc, char** argv) {
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<AStarPlannerNode>();
+    rclcpp::spin(node);
+    rclcpp::shutdown();
+    return 0;
+}
